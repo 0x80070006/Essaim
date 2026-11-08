@@ -117,6 +117,12 @@ void main() {
 
     await until(() => na.items.single.onlinePeers == 1, what: 'A voit B');
 
+    await nb.setSharing(id, false);
+    expect(nb.items.single.status, ItemStatus.finished);
+    await until(() => na.items.single.onlinePeers == 0, what: 'Terminé retire B');
+    await nb.setSharing(id, true);
+    await until(() => na.items.single.onlinePeers == 1, what: 'B repartage');
+
     await na.stop();
     await until(() => nc.items.any((i) => i.entry.id == id && i.status == ItemStatus.available),
         what: 'catalogue vers C');

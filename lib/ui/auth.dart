@@ -364,7 +364,7 @@ class _JoinAccountState extends State<JoinAccount> {
               title: const Text('Il ne s\'affiche pas ?'),
               children: [
                 TextField(controller: _manual, onChanged: (_) => setState(() => _selected = null),
-                    decoration: const InputDecoration(labelText: 'Adresse affichée sur cet appareil', hintText: '100.98.152.31')),
+                    decoration: const InputDecoration(labelText: 'Adresse affichée sur cet appareil', hintText: '100.x.y.z')),
               ],
             ),
             const SizedBox(height: 12),

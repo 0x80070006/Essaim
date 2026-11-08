@@ -7,9 +7,9 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import '../app/controller.dart';
-import '../core/account.dart';
 import '../core/node.dart';
 import 'kit.dart';
+import 'settings.dart';
 
 class Home extends StatefulWidget {
   const Home(this.app, {super.key});
@@ -64,9 +64,17 @@ class _HomeState extends State<Home> {
                   const SizedBox(width: 10),
                   _TabButton('Catalogue · ${node.items.length}', Icons.grid_view_rounded, C.teal, _tab == 1,
                       () => setState(() => _tab = 1)),
+                  const SizedBox(width: 10),
+                  _TabButton('Réglages', Icons.tune_rounded, C.grape, _tab == 2, () => setState(() => _tab = 2)),
                 ]),
               ),
-              Expanded(child: _tab == 0 ? _UploadTab(app, () => setState(() => _tab = 1)) : _CatalogTab(app)),
+              Expanded(
+                child: switch (_tab) {
+                  0 => _UploadTab(app, () => setState(() => _tab = 1)),
+                  1 => _CatalogTab(app),
+                  _ => SettingsTab(app),
+                },
+              ),
             ]),
           ),
         ),
@@ -94,11 +102,14 @@ class _TabButton extends StatelessWidget {
           onTap: onTap,
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 14),
-            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Icon(icon, color: fg, size: 20),
-              const SizedBox(width: 6),
-              Text(label, style: TextStyle(color: fg, fontWeight: FontWeight.w800, fontSize: 15)),
-            ]),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(icon, color: fg, size: 18),
+                const SizedBox(width: 5),
+                Text(label, style: TextStyle(color: fg, fontWeight: FontWeight.w800, fontSize: 14)),
+              ]),
+            ),
           ),
         ),
       ),
@@ -292,10 +303,20 @@ class _FileCard extends StatelessWidget {
                     const SizedBox(height: 3),
                     Text([
                       '${(item.progress * 100).round()} %',
-                      if (item.down > 0) '↓ ${formatBytes(item.down)}/s',
-                      if (item.down > 0) 'reste ${formatEta(remaining / item.down)}',
+                      if (downloading && item.down > 0) '↓ ${formatBytes(item.down)}/s',
+                      if (downloading && item.down > 0) 'reste ${formatEta(remaining / item.down)}',
                     ].join(' · '), style: const TextStyle(fontSize: 13)),
                   ],
+                  if (item.error != null) ...[
+                    const SizedBox(height: 5),
+                    Text(item.error!, style: const TextStyle(fontSize: 13, color: C.tomato, fontWeight: FontWeight.w700)),
+                  ],
+                  for (final x in item.peers.where((x) => !x.self && x.online && x.progress < 1))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text('${x.name} : ${(x.progress * 100).round()} %',
+                          style: const TextStyle(fontSize: 13, color: C.blue, fontWeight: FontWeight.w700)),
+                    ),
                   const SizedBox(height: 7),
                   Row(children: [
                     PeerHexes(item.peers),
@@ -316,7 +337,7 @@ class _FileCard extends StatelessWidget {
                     tooltip: 'Mettre en pause', icon: const Icon(Icons.pause_rounded), onPressed: () => node.pause(id)),
                 ItemStatus.paused => IconButton(
                     tooltip: 'Reprendre', icon: const Icon(Icons.play_arrow_rounded), onPressed: () => node.resume(id)),
-                ItemStatus.seeding => IconButton(
+                ItemStatus.seeding || ItemStatus.finished => IconButton(
                     tooltip: 'Ouvrir', icon: const Icon(Icons.open_in_new_rounded), onPressed: () => app.openFile(item.localPath!)),
                 _ => const SizedBox.shrink(),
               },
@@ -328,55 +349,136 @@ class _FileCard extends StatelessWidget {
   }
 
   Future<void> _download(BuildContext context, Node node, String id) async {
-    if (await app.ensureFileAccess()) {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('Télécharger ce fichier ?'),
+        content: Text('${item.entry.name}\n${formatBytes(item.entry.size)} · ${peersLine(item)}\n\nDestination : ${app.downloadsFolder}'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Annuler')),
+          FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Télécharger')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (!await app.ensureFileAccess()) {
+      if (context.mounted) toast(context, "Sans l'accès aux fichiers, le téléchargement ne peut pas démarrer.");
+      return;
+    }
+    try {
       await node.download(id);
-    } else if (context.mounted) {
-      toast(context, "Autorise l'accès aux fichiers, puis réessaie.");
+    } on FileSystemException catch (e) {
+      if (context.mounted) toast(context, 'Écriture impossible : ${e.osError?.message ?? e.message}');
     }
   }
 
   void _details(BuildContext context) {
-    final node = app.node!;
-    final id = item.entry.id;
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      builder: (c) => SafeArea(
-        child: ListView(shrinkWrap: true, padding: const EdgeInsets.fromLTRB(20, 0, 20, 16), children: [
-          Text(item.entry.name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
-          if (item.localPath != null) ...[const SizedBox(height: 4), SelectableText(item.localPath!)],
-          const SizedBox(height: 10),
-          if (item.peers.isEmpty) const Text('Aucun appareil ne possède ce fichier pour le moment.'),
-          for (final x in item.peers)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(x.platform == 'android' ? Icons.smartphone_rounded : Icons.computer_rounded,
-                  color: x.online ? C.green : C.slate),
-              title: Text(x.self ? '${x.name} (cet appareil)' : x.name),
-              subtitle: Text('${x.online ? 'En ligne' : 'Hors ligne'} · ${(x.progress * 100).round()} %'),
-            ),
-          if (item.localPath != null)
-            TextButton.icon(
-              icon: const Icon(Icons.stop_circle_outlined),
-              label: const Text('Ne plus partager depuis cet appareil'),
-              onPressed: () {
-                node.stopSharing(id);
-                Navigator.pop(c);
-              },
-            ),
-          TextButton.icon(
-            style: TextButton.styleFrom(foregroundColor: C.tomato),
-            icon: const Icon(Icons.delete_outline_rounded),
-            label: const Text('Retirer du catalogue (tous les appareils)'),
-            onPressed: () {
-              node.removeFromCatalog(id);
-              Navigator.pop(c);
-            },
-          ),
-        ]),
-      ),
+      isScrollControlled: true,
+      builder: (_) => _FileSheet(app, item.entry.id),
     );
   }
+}
+
+class _FileSheet extends StatelessWidget {
+  const _FileSheet(this.app, this.id);
+  final AppController app;
+  final String id;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: app,
+        builder: (context, _) {
+          final node = app.node!;
+          final item = node.items.where((i) => i.entry.id == id).firstOrNull;
+          if (item == null) return const SizedBox(height: 80);
+          final s = item.status;
+          final done = s == ItemStatus.seeding || s == ItemStatus.finished;
+          final partial = s == ItemStatus.downloading || s == ItemStatus.stalled || s == ItemStatus.paused;
+          return SafeArea(
+            child: ListView(shrinkWrap: true, padding: const EdgeInsets.fromLTRB(20, 0, 20, 16), children: [
+              Text(item.entry.name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 6),
+              Row(children: [StatusPill(s), const SizedBox(width: 8), Text(formatBytes(item.entry.size))]),
+              if (item.localPath != null) ...[const SizedBox(height: 6), SelectableText(item.localPath!)],
+              if (item.error != null) ...[
+                const SizedBox(height: 6),
+                Text(item.error!, style: const TextStyle(color: C.tomato, fontWeight: FontWeight.w700)),
+              ],
+              const SizedBox(height: 14),
+              if (done)
+                SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment(value: true, label: Text('En partage'), icon: Icon(Icons.upload_rounded)),
+                    ButtonSegment(value: false, label: Text('Terminé'), icon: Icon(Icons.check_rounded)),
+                  ],
+                  selected: {s == ItemStatus.seeding},
+                  onSelectionChanged: (v) => node.setSharing(id, v.first),
+                ),
+              if (partial) ...[
+                LinearProgressIndicator(value: item.progress, minHeight: 9, color: statusOf(s).color,
+                    borderRadius: BorderRadius.circular(9)),
+                const SizedBox(height: 4),
+                Text('${(item.progress * 100).round()} % sur cet appareil'),
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  icon: Icon(s == ItemStatus.paused ? Icons.play_arrow_rounded : Icons.pause_rounded),
+                  label: Text(s == ItemStatus.paused ? 'Reprendre' : 'Mettre en pause'),
+                  onPressed: () => s == ItemStatus.paused ? node.resume(id) : node.pause(id),
+                ),
+                TextButton.icon(
+                  icon: const Icon(Icons.close_rounded),
+                  label: const Text('Annuler le téléchargement'),
+                  onPressed: () {
+                    node.stopSharing(id);
+                    Navigator.pop(context);
+                  },
+                ),
+              ],
+              const SizedBox(height: 8),
+              const Text('Appareils', style: TextStyle(fontWeight: FontWeight.w900)),
+              if (item.peers.isEmpty) const Text('Aucun appareil ne propose ce fichier pour le moment.'),
+              for (final x in item.peers)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(children: [
+                    Icon(x.platform == 'android' ? Icons.smartphone_rounded : Icons.computer_rounded,
+                        color: x.online ? C.green : C.slate),
+                    const SizedBox(width: 10),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(x.self ? '${x.name} (cet appareil)' : x.name, style: const TextStyle(fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 3),
+                      LinearProgressIndicator(value: x.progress, minHeight: 6, color: x.progress >= 1 ? C.green : C.blue,
+                          borderRadius: BorderRadius.circular(9)),
+                    ])),
+                    const SizedBox(width: 10),
+                    Text(x.online ? '${(x.progress * 100).round()} %' : 'Hors ligne'),
+                  ]),
+                ),
+              if (done)
+                TextButton.icon(
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('Oublier ce fichier sur cet appareil'),
+                  onPressed: () {
+                    node.stopSharing(id);
+                    Navigator.pop(context);
+                  },
+                ),
+              TextButton.icon(
+                style: TextButton.styleFrom(foregroundColor: C.tomato),
+                icon: const Icon(Icons.delete_outline_rounded),
+                label: const Text('Retirer du catalogue (tous les appareils)'),
+                onPressed: () {
+                  node.removeFromCatalog(id);
+                  Navigator.pop(context);
+                },
+              ),
+            ]),
+          );
+        },
+      );
 }
 
 class PhoneFileBrowser extends StatefulWidget {
@@ -426,46 +528,6 @@ class DevicesPage extends StatelessWidget {
   const DevicesPage(this.app, {super.key});
   final AppController app;
 
-  Future<String?> _ask(BuildContext c, String title, String label) => showDialog<String>(
-        context: c,
-        builder: (d) {
-          final t = TextEditingController();
-          return AlertDialog(
-            title: Text(title),
-            content: TextField(controller: t, obscureText: true, autofocus: true,
-                decoration: InputDecoration(labelText: label)),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(d), child: const Text('Annuler')),
-              FilledButton(onPressed: () => Navigator.pop(d, t.text), child: const Text('Valider')),
-            ],
-          );
-        },
-      );
-
-  Future<void> _changePassword(BuildContext c) async {
-    final cur = await _ask(c, 'Changer le mot de passe', 'Mot de passe actuel');
-    if (cur == null || !c.mounted) return;
-    final next = await _ask(c, 'Changer le mot de passe', 'Nouveau (8 caractères minimum)');
-    if (next == null || next.length < 8 || !c.mounted) return;
-    try {
-      await app.changePassword(cur, next);
-      if (c.mounted) toast(c, 'Mot de passe changé sur tous tes appareils');
-    } on BadSecret {
-      if (c.mounted) toast(c, 'Mot de passe actuel incorrect');
-    }
-  }
-
-  Future<void> _newCodes(BuildContext c) async {
-    final cur = await _ask(c, 'Nouveaux codes de sécurité', 'Mot de passe');
-    if (cur == null || !c.mounted) return;
-    try {
-      await app.regenerateCodes(cur);
-      if (c.mounted) Navigator.of(c).popUntil((r) => r.isFirst);
-    } on BadSecret {
-      if (c.mounted) toast(c, 'Mot de passe incorrect');
-    }
-  }
-
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(title: const Text('Appareils', style: TextStyle(fontWeight: FontWeight.w900))),
@@ -493,31 +555,6 @@ class DevicesPage extends StatelessWidget {
                     subtitle: Text(d.online ? 'En ligne · ${d.info.addrs.join(', ')}' : 'Hors ligne'),
                   ),
                 ),
-              const SizedBox(height: 14),
-              const Text('Sécurité', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-              if (app.biometricAvailable)
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Déverrouiller avec mon empreinte'),
-                  value: app.biometricEnabled,
-                  onChanged: app.setBiometric,
-                ),
-              if (Platform.isWindows)
-                FutureBuilder<bool>(
-                  future: app.startsWithWindows(),
-                  builder: (_, s) => SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Lancer Essaim au démarrage de Windows'),
-                    value: s.data ?? false,
-                    onChanged: app.setStartsWithWindows,
-                  ),
-                ),
-              ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.password_rounded),
-                  title: const Text('Changer le mot de passe'), onTap: () => _changePassword(context)),
-              ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.key_rounded),
-                  title: const Text('Générer de nouveaux codes de sécurité'),
-                  subtitle: Text('${node.vault.recoveryLeft} code(s) restant(s)'),
-                  onTap: () => _newCodes(context)),
             ]);
           },
         ),
