@@ -264,7 +264,7 @@ class Node {
         _vault = vault;
 
   final String dataDir;
-  final String downloadsDir;
+  String downloadsDir;
   String deviceName;
   final String platform;
   final int port;
@@ -798,6 +798,9 @@ class Node {
       final l = _local[id];
       if (l == null || l.complete || l.paused) return;
       final m = await _fetchManifest(id);
+      // Nothing written yet: follow the current destination after a failure.
+      if (l.bits.every((b) => b == 0)) l.path = _partPath(id);
+      await Directory(p.dirname(l.path)).create(recursive: true);
       if (m == null) {
         _errors[id] = 'Impossible de récupérer ce fichier auprès des pairs';
         return;

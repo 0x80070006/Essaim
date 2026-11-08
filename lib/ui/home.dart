@@ -349,6 +349,8 @@ class _FileCard extends StatelessWidget {
   }
 
   Future<void> _download(BuildContext context, Node node, String id) async {
+    await app.prepareDownloads();
+    if (!context.mounted) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (d) => AlertDialog(
@@ -361,10 +363,6 @@ class _FileCard extends StatelessWidget {
       ),
     );
     if (ok != true) return;
-    if (!await app.ensureFileAccess()) {
-      if (context.mounted) toast(context, "Sans l'accès aux fichiers, le téléchargement ne peut pas démarrer.");
-      return;
-    }
     try {
       await node.download(id);
     } on FileSystemException catch (e) {

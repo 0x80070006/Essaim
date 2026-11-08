@@ -40,7 +40,7 @@ class AppController extends ChangeNotifier {
     _dataDir = (await getApplicationSupportDirectory()).path;
     await Directory(_dataDir).create(recursive: true);
     if (Platform.isAndroid) {
-      _downloads = '/storage/emulated/0/Download/Essaim';
+      _downloads = _publicDownloads;
       _deviceName = await native.invokeMethod<String>('deviceName') ?? 'Android';
       biometricAvailable = await _auth.canCheckBiometrics || await _auth.isDeviceSupported();
     } else {
@@ -56,6 +56,7 @@ class AppController extends ChangeNotifier {
       themeMode = ThemeMode.values.byName(j['theme'] as String? ?? 'system');
       _deviceName = j['deviceName'] as String? ?? _deviceName;
     }
+    await prepareDownloads();
     final key = await _readKey();
     final vaultFile = File(_vaultPath);
     if (key != null && await vaultFile.exists()) {
@@ -83,6 +84,38 @@ class AppController extends ChangeNotifier {
     final sealed = await _keyFile.readAsBytes();
     if (!Platform.isAndroid) return dpapiUnprotect(sealed);
     return unb64((await native.invokeMethod<String>('unseal', {'value': b64(sealed)}))!);
+  }
+
+  static const _publicDownloads = '/storage/emulated/0/Download/Essaim';
+
+  Future<bool> _isWritable(String dir) async {
+    try {
+      final parts = Directory(p.join(dir, '.partiel'));
+      await parts.create(recursive: true);
+      final probe = File(p.join(parts.path, '.essai'));
+      final raf = await probe.open(mode: FileMode.append);
+      await raf.truncate(1);
+      await raf.close();
+      await probe.rename(p.join(dir, '.essai'));
+      await File(p.join(dir, '.essai')).delete();
+      return true;
+    } on FileSystemException {
+      return false;
+    }
+  }
+
+  /// Android may refuse the public folder even with the permission shown as
+  /// granted (GrapheneOS Storage Scopes). The app's media folder needs none.
+  Future<void> prepareDownloads() async {
+    if (!Platform.isAndroid) return;
+    if (!await _isWritable(_publicDownloads)) {
+      final media = await native.invokeMethod<String>('mediaDir');
+      _downloads = p.join(media!, 'Essaim');
+    } else {
+      _downloads = _publicDownloads;
+    }
+    node?.downloadsDir = _downloads;
+    notifyListeners();
   }
 
   Future<void> _saveVault(Vault v) async {

@@ -46,6 +46,7 @@ class EssaimApp : FlutterApplication() {
         val engine = FlutterEngine(this)
         MethodChannel(engine.dartExecutor.binaryMessenger, "essaim/native").setMethodCallHandler { call, result ->
             when (call.method) {
+                "mediaDir" -> result.success(externalMediaDirs.first { it != null }.path)
                 "seal" -> result.success(seal(call.argument<String>("value")!!))
                 "unseal" -> result.success(unseal(call.argument<String>("value")!!))
                 "deviceName" -> result.success(Build.MODEL)
