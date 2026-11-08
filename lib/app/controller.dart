@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:path/path.dart' as p;
@@ -25,6 +25,8 @@ class AppController extends ChangeNotifier {
   List<String>? pendingCodes;
   bool biometricEnabled = false;
   bool biometricAvailable = false;
+  int autoLockMinutes = 2;
+  ThemeMode themeMode = ThemeMode.system;
   late String _dataDir;
   late String _downloads;
   late String _deviceName;
@@ -40,7 +42,7 @@ class AppController extends ChangeNotifier {
     if (Platform.isAndroid) {
       _downloads = '/storage/emulated/0/Download/Essaim';
       _deviceName = await native.invokeMethod<String>('deviceName') ?? 'Android';
-      biometricAvailable = await _auth.canCheckBiometrics;
+      biometricAvailable = await _auth.canCheckBiometrics || await _auth.isDeviceSupported();
     } else {
       final dl = await getDownloadsDirectory();
       _downloads = p.join(dl?.path ?? _dataDir, 'Essaim');
@@ -48,7 +50,11 @@ class AppController extends ChangeNotifier {
     }
     final prefs = File(_prefsPath);
     if (await prefs.exists()) {
-      biometricEnabled = (jsonDecode(await prefs.readAsString()) as Map)['biometric'] == true;
+      final j = jsonDecode(await prefs.readAsString()) as Map;
+      biometricEnabled = j['biometric'] == true;
+      autoLockMinutes = j['autoLock'] as int? ?? 2;
+      themeMode = ThemeMode.values.byName(j['theme'] as String? ?? 'system');
+      _deviceName = j['deviceName'] as String? ?? _deviceName;
     }
     final key = await _readKey();
     final vaultFile = File(_vaultPath);
@@ -192,11 +198,41 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> setBiometric(bool enabled) async {
-    if (enabled && !await _promptBiometric('Activer le déverrouillage par empreinte')) return;
-    biometricEnabled = enabled;
-    await File(_prefsPath).writeAsString(jsonEncode({'biometric': enabled}));
+  Future<void> _savePrefs() async {
+    await File(_prefsPath).writeAsString(jsonEncode({
+      'biometric': biometricEnabled,
+      'autoLock': autoLockMinutes,
+      'theme': themeMode.name,
+      'deviceName': _deviceName,
+    }));
     notifyListeners();
+  }
+
+  /// Returns false when the fingerprint prompt was refused or unavailable.
+  Future<bool> setBiometric(bool enabled) async {
+    if (enabled && !await _promptBiometric('Activer le déverrouillage par empreinte')) return false;
+    biometricEnabled = enabled;
+    await _savePrefs();
+    return true;
+  }
+
+  String get deviceName => _deviceName;
+  String get downloadsFolder => _downloads;
+
+  Future<void> rename(String name) async {
+    _deviceName = name;
+    node?.deviceName = name;
+    await _savePrefs();
+  }
+
+  Future<void> setAutoLock(int minutes) async {
+    autoLockMinutes = minutes;
+    await _savePrefs();
+  }
+
+  Future<void> setTheme(ThemeMode mode) async {
+    themeMode = mode;
+    await _savePrefs();
   }
 
   void onBackgrounded() => _backgroundedAt = DateTime.now();
@@ -204,8 +240,8 @@ class AppController extends ChangeNotifier {
   void onResumed() {
     final since = _backgroundedAt;
     _backgroundedAt = null;
-    if (since != null && phase == Phase.home &&
-        DateTime.now().difference(since) > const Duration(minutes: 2)) {
+    if (since != null && phase == Phase.home && autoLockMinutes >= 0 &&
+        DateTime.now().difference(since) >= Duration(minutes: autoLockMinutes)) {
       lock();
     }
   }
@@ -222,6 +258,11 @@ class AppController extends ChangeNotifier {
     if (!Platform.isAndroid) return true;
     if (await native.invokeMethod<bool>('hasAllFiles') == true) return true;
     await native.invokeMethod<void>('requestAllFiles');
+    // Android has no callback for this screen, so wait for the switch.
+    for (var i = 0; i < 240; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      if (await native.invokeMethod<bool>('hasAllFiles') == true) return true;
+    }
     return false;
   }
 

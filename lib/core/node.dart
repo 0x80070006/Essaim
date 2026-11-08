@@ -16,7 +16,7 @@ const int _workersPerPeer = 4;
 const Duration _clockTolerance = Duration(minutes: 5);
 const Duration _onlineWindow = Duration(seconds: 12);
 
-enum ItemStatus { seeding, downloading, stalled, paused, available, unreachable, missing }
+enum ItemStatus { seeding, finished, downloading, stalled, paused, available, unreachable, missing }
 
 class DeviceInfo {
   DeviceInfo(this.id, this.name, this.platform, this.addrs);
@@ -86,13 +86,16 @@ class CatalogEntry {
 
 class _LocalFile {
   _LocalFile(this.id, this.path, this.complete, this.bits, this.mtime,
-      {this.paused = false});
+      {this.paused = false, this.sharing = true});
   final String id;
   String path;
   bool complete;
   Uint8List bits;
   int mtime;
   bool paused;
+
+  /// False once the user marks a finished file as "Terminé".
+  bool sharing;
 
   Map<String, Object?> toJson() => {
         'id': id,
@@ -101,6 +104,7 @@ class _LocalFile {
         'bits': b64(bits),
         'mtime': mtime,
         'paused': paused,
+        'sharing': sharing,
       };
   factory _LocalFile.fromJson(Map<String, Object?> j) => _LocalFile(
       j['id'] as String,
@@ -108,7 +112,8 @@ class _LocalFile {
       j['complete'] as bool,
       unb64(j['bits'] as String),
       j['mtime'] as int,
-      paused: j['paused'] as bool);
+      paused: j['paused'] as bool,
+      sharing: j['sharing'] as bool? ?? true);
 }
 
 bool _bit(List<int> bits, int i) =>
@@ -124,8 +129,9 @@ int _countBits(List<int> bits, int n) {
 }
 
 class _Have {
-  _Have(this.complete, this.bits);
+  _Have(this.complete, this.bits, this.pct);
   final bool complete;
+  final double pct;
   final Uint8List? bits;
   bool has(int i) =>
       complete || (bits != null && i >> 3 < bits!.length && _bit(bits!, i));
@@ -165,7 +171,7 @@ class _Rate {
   double perSecond = 0;
   void tick() {
     perSecond = perSecond * 0.6 + pending * 0.4;
-    if (perSecond < 1) perSecond = 0;
+    if (perSecond < 1024) perSecond = 0;
     pending = 0;
   }
 }
@@ -181,7 +187,7 @@ class PeerProgress {
 
 class CatalogItem {
   CatalogItem(this.entry, this.status, this.progress, this.peers, this.down,
-      this.up, this.localPath);
+      this.up, this.localPath, this.error);
   final CatalogEntry entry;
   final ItemStatus status;
   final double progress;
@@ -189,6 +195,7 @@ class CatalogItem {
   final double down;
   final double up;
   final String? localPath;
+  final String? error;
 
   /// Other online devices holding at least one piece.
   int get onlinePeers =>
@@ -258,7 +265,7 @@ class Node {
 
   final String dataDir;
   final String downloadsDir;
-  final String deviceName;
+  String deviceName;
   final String platform;
   final int port;
 
@@ -289,6 +296,7 @@ class Node {
   final Map<String, _Rate> _down = {};
   final Map<String, _Rate> _up = {};
   final Set<String> _missing = {};
+  final Map<String, String> _errors = {};
   final List<HashingJob> hashingJobs = [];
   PairingSession? _pairing;
   PairingSession? get pairing => _pairing;
@@ -353,6 +361,11 @@ class Node {
     for (final e in (await _read('local.json') as List? ?? [])) {
       final l = _LocalFile.fromJson((e as Map).cast());
       _local[l.id] = l;
+    }
+    await for (final f in Directory(p.join(dataDir, 'manifests')).list()) {
+      if (f is! File || !f.path.endsWith('.json')) continue;
+      final m = Manifest.fromJson((jsonDecode(await f.readAsString()) as Map).cast());
+      _manifests[p.basenameWithoutExtension(f.path)] = m;
     }
     for (final e in (await _read('peers.json') as List? ?? [])) {
       final d = DeviceInfo.fromJson((e as Map).cast());
@@ -529,7 +542,7 @@ class Node {
   Future<void> _servePiece(HttpRequest r, String id, int index) async {
     final l = _local[id];
     final m = await _manifestOf(id);
-    if (l == null || m == null || _missing.contains(id) ||
+    if (l == null || m == null || _missing.contains(id) || (l.complete && !l.sharing) ||
         index < 0 || index >= m.pieceCount || !_bit(l.bits, index)) {
       return _reply(r, 404);
     }
@@ -551,8 +564,15 @@ class Node {
   Map<String, Object?> _haveMap() {
     final out = <String, Object?>{};
     _local.forEach((id, l) {
-      if (_missing.contains(id)) return;
-      out[id] = l.complete ? {'complete': true} : {'complete': false, 'bits': b64(l.bits)};
+      if (_missing.contains(id) || (l.complete && !l.sharing)) return;
+      final total = _manifests[id]?.pieceCount ?? 0;
+      out[id] = l.complete
+          ? {'complete': true}
+          : {
+              'complete': false,
+              'bits': b64(l.bits),
+              'pct': total == 0 ? 0.0 : _countBits(l.bits, total) / total,
+            };
     });
     return out;
   }
@@ -575,7 +595,7 @@ class Node {
       peer.failures = 0;
       peer.have = (m['have'] as Map).map((k, v) {
         final bits = v['bits'] as String?;
-        return MapEntry(k as String, _Have(v['complete'] as bool, bits == null ? null : unb64(bits)));
+        return MapEntry(k as String, _Have(v['complete'] as bool, bits == null ? null : unb64(bits), (v['pct'] as num? ?? 0).toDouble()));
       });
     }
     for (final raw in m['known'] as List) {
@@ -700,7 +720,18 @@ class Node {
     unawaited(syncNow());
   }
 
+  /// Switches a finished file between "En partage" and "Terminé".
+  Future<void> setSharing(String id, bool on) async {
+    final l = _local[id];
+    if (l == null || !l.complete) return;
+    l.sharing = on;
+    await _save();
+    _notify();
+    unawaited(syncNow());
+  }
+
   Future<void> _dropLocal(String id) async {
+    _errors.remove(id);
     await _closeDownload(id);
     final l = _local.remove(id);
     _missing.remove(id);
@@ -767,12 +798,20 @@ class Node {
       final l = _local[id];
       if (l == null || l.complete || l.paused) return;
       final m = await _fetchManifest(id);
-      if (m == null || _local[id] != l || l.paused) return;
+      if (m == null) {
+        _errors[id] = 'Impossible de récupérer ce fichier auprès des pairs';
+        return;
+      }
+      if (_local[id] != l || l.paused) return;
       if (l.bits.length != (m.pieceCount + 7) >> 3) l.bits = _newBits(m.pieceCount);
       final raf = await File(l.path).open(mode: FileMode.append);
       await raf.truncate(m.size);
       _downloads[id] = _Download(m, raf);
+      _errors.remove(id);
       _pump(id);
+    } on FileSystemException catch (e) {
+      _errors[id] = 'Écriture impossible : ${e.osError?.message ?? e.message}';
+      _notify();
     } finally {
       _starting.remove(id);
     }
@@ -845,13 +884,18 @@ class Node {
       if (d.closing) return;
       _setBit(l.bits, i);
       (_down[id] ??= _Rate()).pending += data.length;
+      _errors.remove(id);
       if (_countBits(l.bits, d.manifest.pieceCount) == d.manifest.pieceCount) {
         await _finish(id, d, l);
       } else if (DateTime.now().difference(d.lastSave).inSeconds >= 2) {
         d.lastSave = DateTime.now();
         await _save();
       }
+    } on FileSystemException catch (e) {
+      _errors[id] = 'Écriture impossible : ${e.osError?.message ?? e.message}';
+      d.banned[x.info.id] = DateTime.now().add(const Duration(seconds: 5));
     } catch (_) {
+      _errors[id] = 'Impossible de joindre ${x.info.name}';
       d.banned[x.info.id] = DateTime.now().add(const Duration(seconds: 5));
     } finally {
       d.inflight.remove(i);
@@ -924,13 +968,13 @@ class Node {
               : _countBits(l.bits, total) / total;
     }
     final peers = <PeerProgress>[
-      if (l != null && !_missing.contains(id))
+      if (l != null && !_missing.contains(id) && (l.sharing || !l.complete))
         PeerProgress(deviceName, platform, true, mine, true),
     ];
     for (final x in _peers.values) {
       final have = x.have[id];
       if (have == null) continue;
-      final pct = have.complete ? 1.0 : (total == 0 ? 0.0 : have.count(total) / total);
+      final pct = have.complete ? 1.0 : (total == 0 ? have.pct : have.count(total) / total);
       peers.add(PeerProgress(x.info.name, x.info.platform, x.online, pct, false));
     }
     final anyOnline = peers.any((x) => !x.self && x.online && x.progress > 0);
@@ -939,14 +983,18 @@ class Node {
     if (l == null) {
       status = anyOnline ? ItemStatus.available : ItemStatus.unreachable;
     } else if (l.complete) {
-      status = _missing.contains(id) ? ItemStatus.missing : ItemStatus.seeding;
+      status = _missing.contains(id)
+          ? ItemStatus.missing
+          : l.sharing
+              ? ItemStatus.seeding
+              : ItemStatus.finished;
     } else if (l.paused) {
       status = ItemStatus.paused;
     } else {
       status = anyOnline ? ItemStatus.downloading : ItemStatus.stalled;
     }
     return CatalogItem(e, status, mine, peers, down, _up[id]?.perSecond ?? 0,
-        l != null && l.complete ? l.path : null);
+        l != null && l.complete ? l.path : null, _errors[id]);
   }
 
   List<DeviceView> get devices => [

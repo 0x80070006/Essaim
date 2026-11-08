@@ -76,14 +76,15 @@ class _EssaimAppState extends State<EssaimApp>
   }
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'Essaim',
-        debugShowCheckedModeBanner: false,
-        theme: buildTheme(Brightness.light),
-        darkTheme: buildTheme(Brightness.dark),
-        home: ListenableBuilder(
-          listenable: widget.app,
-          builder: (_, _) => switch (widget.app.phase) {
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: widget.app,
+        builder: (_, _) => MaterialApp(
+          title: 'Essaim',
+          debugShowCheckedModeBanner: false,
+          theme: buildTheme(Brightness.light),
+          darkTheme: buildTheme(Brightness.dark),
+          themeMode: widget.app.themeMode,
+          home: switch (widget.app.phase) {
             Phase.loading => const Scaffold(body: Center(child: CircularProgressIndicator())),
             Phase.welcome => Welcome(widget.app),
             Phase.locked => LockScreen(widget.app),

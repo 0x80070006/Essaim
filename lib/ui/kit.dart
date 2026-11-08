@@ -145,6 +145,7 @@ class FileHex extends StatelessWidget {
 
 ({String label, Color color, IconData icon}) statusOf(ItemStatus s) => switch (s) {
       ItemStatus.seeding => (label: 'En partage', color: C.green, icon: Icons.upload_rounded),
+      ItemStatus.finished => (label: 'Terminé', color: C.grape, icon: Icons.check_rounded),
       ItemStatus.downloading => (label: 'Téléchargement', color: C.blue, icon: Icons.download_rounded),
       ItemStatus.stalled => (label: 'En attente de pairs', color: C.marigold, icon: Icons.hourglass_top_rounded),
       ItemStatus.paused => (label: 'En pause', color: C.slate, icon: Icons.pause_rounded),
